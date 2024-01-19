@@ -94,13 +94,37 @@ lxd_launch_all() {
     local IMAGE
     local ID_LIKE
     local IS_VM
+    local KV
+    local KEY
+    local VAL
 
     set -e
     for NODENAME in $($YQ ".server.[] | key" < "$CONFIG_INSTANCE"); do
-        INDEX=$($YQ ".server.${NODENAME}.index" < "$CONFIG_INSTANCE")
-        IMAGE=$($YQ ".server.${NODENAME}.image" < "$CONFIG_INSTANCE")
-        ID_LIKE=$($YQ ".server.${NODENAME}.like" < "$CONFIG_INSTANCE")
-        IS_VM=$(yaml_bool $($YQ ".server.${NODENAME}.vm" < "$CONFIG_INSTANCE"))
+        IFS_OLD=$IFS
+        IFS=$'\n'
+        for KV in $($YQ ".server.${NODENAME}" < "$CONFIG_INSTANCE"); do
+            KEY=$(echo "$KV" | awk -F": " '{print $1}')
+            VAL=$(echo "$KV" | awk -F": " '{print $2}')
+            case $KEY in
+                index)
+                    INDEX=$VAL
+                    ;;
+                image)
+                    IMAGE=$VAL
+                    ;;
+                like)
+                    ID_LIKE=$VAL
+                    ;;
+                vm)
+                    IS_VM=$(yaml_bool $VAL)
+                    ;;
+            esac
+        done
+        IFS=$IFS_OLD
+        echo INDEX=$INDEX
+        echo IMAGE=$IMAGE
+        echo ID_LIKE=$ID_LIKE
+        echo IS_VM=$IS_VM
         lxd_launch "$INDEX" "${LXD_NODENAME_PREFIX}${NODENAME}" "$IMAGE" "$ID_LIKE" "$IS_VM" < /dev/null
     done
 }
@@ -116,10 +140,6 @@ lxd_all_common() {
 
     set -e
     for NODENAME in $($YQ ".server.[] | key" < "$CONFIG_INSTANCE"); do
-        INDEX=$($YQ ".server.${NODENAME}.index" < "$CONFIG_INSTANCE")
-        IMAGE=$($YQ ".server.${NODENAME}.image" < "$CONFIG_INSTANCE")
-        ID_LIKE=$($YQ ".server.${NODENAME}.like" < "$CONFIG_INSTANCE")
-        IS_VM=$(yaml_bool $($YQ ".server.${NODENAME}.vm" < "$CONFIG_INSTANCE"))
         $LXC $COMMAND "${LXD_NODENAME_PREFIX}${NODENAME}" < /dev/null || $IF_FAIL
     done
 }
