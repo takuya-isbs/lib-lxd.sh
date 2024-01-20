@@ -162,6 +162,7 @@ lxd_delete_all() {
 
 lxd_profile_init() {
     $LXC profile delete $LXD_PROFILE || true  # may be used by other instance
+    # TODO support bridge (br0) of host
     $LXC network delete $LXD_NET1_IF || true
     $LXC network delete $LXD_NET2_IF || true
     if $LXC profile create $LXD_PROFILE; then
@@ -172,7 +173,7 @@ lxd_profile_init() {
             || true
         $LXC network create $LXD_NET2_IF \
              ipv4.address=${LXD_NET2_IPADDR_PREFIX}1/24 \
-             ipv4.dhcp.ranges=${LXD_NET2_IPADDR_PREFIX}${LXD_NET2_IPADDR_START}-${LXD_NET2_IPADDR_PREFIX}${LXD_NET2_IPADDR_END} \
+             ipv4.dhcp=false \
              ipv4.nat=false \
              ipv6.nat=false \
              ipv6.address=none \
@@ -192,16 +193,20 @@ lxd_launch() {
     local ID_LIKE="$4"
     local IS_VM="$5"
 
-    local IPADDR_INDEX=$((LXD_NET1_IPADDR_START + INDEX - 1))
-    local IPADDR="${LXD_NET1_IPADDR_PREFIX}${IPADDR_INDEX}"
+    local IPADDR_1_INDEX=$((LXD_NET1_IPADDR_START + INDEX - 1))
+    local IPADDR_2_INDEX=$((LXD_NET2_IPADDR_START + INDEX - 1))
+    local IPADDR_1="${LXD_NET1_IPADDR_PREFIX}${IPADDR_1_INDEX}"
+    local IPADDR_2="${LXD_NET2_IPADDR_PREFIX}${IPADDR_2_INDEX}"
     set -e  # func is called in func
 
     local OPT_VM=
     local OPT_SEC=
-    local NET_IF=eth0
+    local NET1_IF=eth0
+    local NET2_IF=eth1
     if [ $IS_VM -eq 1 ]; then
         OPT_VM="--vm"
-        NET_IF=enp5s0
+        NET1_IF=enp5s0
+        NET2_IF=enp6s0
     else
         OPT_SEC="-c security.nesting=true"
         #OPT_SEC+=" -c security.privileged=true"
@@ -209,10 +214,54 @@ lxd_launch() {
 
     $LXC launch $IMAGE $NAME $OPT_VM $OPT_SEC -p $LXD_PROFILE
     lxd_wait_for_wakeup $NAME
-    lxd_get_ipv4_retry $NAME $NET_IF
+    lxd_get_ipv4_retry $NAME $NET1_IF
+
+    case $ID_LIKE in
+        debian)
+            local CONF=/etc/netplan/50-init.yaml
+            $LXC exec $NAME -- touch $CONF
+            $LXC exec $NAME -- chmod 600 $CONF
+            $LXC exec $NAME -- tee $CONF <<EOF
+network:
+  version: 2
+  ethernets:
+    ${NET1_IF}:
+      dhcp4: true
+      dhcp6: true
+    ${NET2_IF}:
+      addresses:
+         - ${IPADDR_2}/24
+      dhcp4: false
+      dhcp6: false
+      accept-ra: false
+      link-local: []
+EOF
+            ;;
+        rhel)
+            if [ $IS_VM -eq 1 ]; then
+                # for NetworkManager
+                $LXC exec $NAME -- nmcli connection add type ethernet con-name eth1 ifname $NET2_IF
+                $LXC exec $NAME -- nmcli connection modify eth1 ipv4.method manual ipv4.addr ${IPADDR_2}/24
+            else  # container
+                # for network-scripts (NetworkManager(nmcli) is not installed)
+                local CONF=/etc/sysconfig/network-scripts/ifcfg-eth1
+                $LXC exec $NAME -- tee $CONF <<EOF
+DEVICE=eth1
+BOOTPROTO=no
+IPADDR=${IPADDR_2}
+NETMASK=255.255.255.0
+ONBOOT=yes
+USERCTL=no
+EOF
+            fi
+            ;;
+    esac
 
     $LXC stop $NAME
-    $LXC config device override $NAME eth0 ipv4.address=${IPADDR}
+    # eth0: static IP address from DHCP
+    $LXC config device override $NAME eth0 ipv4.address=${IPADDR_1}
+    # eth1: DHCP is disabled
+    #$LXC config device override $NAME eth1 ipv4.address=${IPADDR_2}
     if [ $LXD_ENABLE_MAP_UID -eq 1 ]; then
         local MYUID=$(stat -c %u "$BASE_DIR")
         # same owner
@@ -223,7 +272,7 @@ lxd_launch() {
 
     lxd_wait_for_wakeup $NAME
 
-    lxd_get_ipv4_retry $NAME $NET_IF
+    lxd_get_ipv4_retry $NAME $NET1_IF
     $LXC config show $NAME
 
     # User

@@ -6,4 +6,5 @@ source ./lib-lxd.sh
 
 lxd_profile_init
 lxd_launch_all
+lxd_list_all
 DONE
