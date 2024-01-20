@@ -132,21 +132,25 @@ server:
     image: images:almalinux/8
     like: rhel
     vm: false
+    disk: 6GB
   test2:
     index: 2
     image: ubuntu-daily:24.04
     like: debian
     vm: false
+    disk: 6GB
   test3:
     index: 3
     image: images:rockylinux/8
     like: rhel
     vm: true
+    disk: 6GB
   test4:
     index: 4
     image: images:ubuntu/22.04
     like: debian
     vm: true
+    disk: 6GB
 ```
 
 ### Prepare storage pool

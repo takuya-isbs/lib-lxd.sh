@@ -82,9 +82,9 @@ lxd_list_all() {
 yaml_bool() {
     local b="$1"
     if [ "$b" = "true" ]; then
-        echo 1
+        echo true
     else
-        echo 0
+        echo false
     fi
 }
 
@@ -93,7 +93,8 @@ lxd_launch_all() {
     local NODENAME
     local IMAGE
     local ID_LIKE
-    local IS_VM
+    local IS_VM=0
+    local DISK="10GB"
     local KV
     local KEY
     local VAL
@@ -118,6 +119,9 @@ lxd_launch_all() {
                 vm)
                     IS_VM=$(yaml_bool $VAL)
                     ;;
+                disk)
+                    DISK=$VAL
+                    ;;
             esac
         done
         IFS=$IFS_OLD
@@ -125,18 +129,15 @@ lxd_launch_all() {
         echo IMAGE=$IMAGE
         echo ID_LIKE=$ID_LIKE
         echo IS_VM=$IS_VM
-        lxd_launch "$INDEX" "${LXD_NODENAME_PREFIX}${NODENAME}" "$IMAGE" "$ID_LIKE" "$IS_VM" < /dev/null
+        echo DISK=$DISK
+        lxd_launch "$INDEX" "${LXD_NODENAME_PREFIX}${NODENAME}" "$IMAGE" "$ID_LIKE" "$IS_VM" "$DISK" < /dev/null
     done
 }
 
 lxd_all_common() {
     local COMMAND="$1"
     local IF_FAIL="$2"
-    local INDEX
     local NODENAME
-    local IMAGE
-    local ID_LIKE
-    local IS_VM
 
     set -e
     for NODENAME in $($YQ ".server.[] | key" < "$CONFIG_INSTANCE"); do
@@ -180,7 +181,7 @@ lxd_profile_init() {
             || true
         $LXC profile device add $LXD_PROFILE eth0 nic network=$LXD_NET1_IF || true
         $LXC profile device add $LXD_PROFILE eth1 nic network=$LXD_NET2_IF || true
-        $LXC profile device add $LXD_PROFILE root disk path=/ pool=$LXD_STORAGE_POOL || true
+        $LXC profile device add $LXD_PROFILE root disk path=/ pool=$LXD_STORAGE_POOL size=5GB || true
     else
         true  # may exist
     fi
@@ -192,6 +193,7 @@ lxd_launch() {
     local IMAGE="$3"
     local ID_LIKE="$4"
     local IS_VM="$5"
+    local DISK="$6"
 
     local IPADDR_1_INDEX=$((LXD_NET1_IPADDR_START + INDEX - 1))
     local IPADDR_2_INDEX=$((LXD_NET2_IPADDR_START + INDEX - 1))
@@ -203,7 +205,7 @@ lxd_launch() {
     local OPT_SEC=
     local NET1_IF=eth0
     local NET2_IF=eth1
-    if [ $IS_VM -eq 1 ]; then
+    if $IS_VM; then
         OPT_VM="--vm"
         NET1_IF=enp5s0
         NET2_IF=enp6s0
@@ -216,16 +218,18 @@ lxd_launch() {
     lxd_wait_for_wakeup $NAME
     lxd_get_ipv4_retry $NAME $NET1_IF
 
+    $LXC config device override $NAME root size=$DISK
+
     case $ID_LIKE in
         debian)
-            $LXC exec $NAME -- apt-get update
-            $LXC exec $NAME -- apt-get install -y openssh-server
-            $LXC exec $NAME -- systemctl enable ssh
-            $LXC exec $NAME -- systemctl restart ssh
+            lxd_exec $NAME apt-get update
+            lxd_exec $NAME apt-get install -y openssh-server
+            lxd_exec $NAME systemctl enable ssh
+            lxd_exec $NAME systemctl restart ssh
             local CONF=/etc/netplan/50-init.yaml
-            $LXC exec $NAME -- touch $CONF
-            $LXC exec $NAME -- chmod 600 $CONF
-            $LXC exec $NAME -- tee $CONF <<EOF
+            lxd_exec $NAME touch $CONF
+            lxd_exec $NAME chmod 600 $CONF
+            lxd_exec $NAME tee $CONF <<EOF
 network:
   version: 2
   ethernets:
@@ -242,16 +246,16 @@ network:
 EOF
             ;;
         rhel)
-            $LXC exec $NAME -- yum install -y openssh-server
-            $LXC exec $NAME -- systemctl restart sshd
-            if [ $IS_VM -eq 1 ]; then
+            lxd_exec $NAME yum install -y openssh-server
+            lxd_exec $NAME systemctl restart sshd
+            if $IS_VM; then
                 # for NetworkManager
-                $LXC exec $NAME -- nmcli connection add type ethernet con-name eth1 ifname $NET2_IF
-                $LXC exec $NAME -- nmcli connection modify eth1 ipv4.method manual ipv4.addr ${IPADDR_2}/24
+                lxd_exec $NAME nmcli connection add type ethernet con-name eth1 ifname $NET2_IF
+                lxd_exec $NAME nmcli connection modify eth1 ipv4.method manual ipv4.addr ${IPADDR_2}/24
             else  # container
                 # for network-scripts (NetworkManager(nmcli) is not installed)
                 local CONF=/etc/sysconfig/network-scripts/ifcfg-eth1
-                $LXC exec $NAME -- tee $CONF <<EOF
+                lxd_exec $NAME tee $CONF <<EOF
 DEVICE=eth1
 BOOTPROTO=no
 IPADDR=${IPADDR_2}
@@ -277,7 +281,6 @@ EOF
     $LXC start $NAME
 
     lxd_wait_for_wakeup $NAME
-
     lxd_get_ipv4_retry $NAME $NET1_IF
     $LXC config show $NAME
 
@@ -289,6 +292,29 @@ EOF
     lxd_exec $NAME chown -R ${MAIN_USER}:${MAIN_USER} "$SSHDIR"
     lxd_exec $NAME chmod 700 "$SSHDIR"
     lxd_exec $NAME chmod 600 "${SSHDIR}/authorized_keys"
+
+    case $ID_LIKE in
+        debian)
+            lxd_exec $NAME usermod -a -G sudo $MAIN_USER
+            # automatic grow disk space
+            ;;
+        rhel)
+            lxd_exec $NAME usermod -a -G wheel $MAIN_USER
+            if $IS_VM; then
+                # grow disk space
+                local DEVICE
+                local PREFIX
+                local SUFFIX
+                # root partition
+                lxd_exec $NAME yum install -y e2fsprogs cloud-utils-growpart gdisk
+                DEVICE=$(lxd_exec $NAME mount | awk '$3 == "/" {print $1}')
+                PREFIX="${DEVICE%%[0-9]*}"
+                SUFFIX="${DEVICE#"$PREFIX"}"
+                lxd_exec $NAME growpart $PREFIX $SUFFIX || true
+                lxd_exec $NAME resize2fs $DEVICE || true
+            fi
+            ;;
+    esac
 }
 
 lxd_exist() {
