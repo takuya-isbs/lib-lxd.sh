@@ -218,6 +218,10 @@ lxd_launch() {
 
     case $ID_LIKE in
         debian)
+            $LXC exec $NAME -- apt-get update
+            $LXC exec $NAME -- apt-get install -y openssh-server
+            $LXC exec $NAME -- systemctl enable ssh
+            $LXC exec $NAME -- systemctl restart ssh
             local CONF=/etc/netplan/50-init.yaml
             $LXC exec $NAME -- touch $CONF
             $LXC exec $NAME -- chmod 600 $CONF
@@ -238,6 +242,8 @@ network:
 EOF
             ;;
         rhel)
+            $LXC exec $NAME -- yum install -y openssh-server
+            $LXC exec $NAME -- systemctl restart sshd
             if [ $IS_VM -eq 1 ]; then
                 # for NetworkManager
                 $LXC exec $NAME -- nmcli connection add type ethernet con-name eth1 ifname $NET2_IF
@@ -327,7 +333,31 @@ lxd_get_ipv4_retry() {
 lxd_exec() {
     local NAME="$1"
     shift
-    $LXC exec ${NAME} -- "$@"
+    $LXC exec "${LXD_NODENAME_PREFIX}${NODENAME}" -- "$@"
+}
+
+lxd_exec_all() {
+    local IGNORE_ERROR="$1"
+    shift
+    local INDEX
+    local NODENAME
+    local IMAGE
+    local ID_LIKE
+    local IS_VM
+
+    set -e
+    for NODENAME in $($YQ ".server.[] | key" < "$CONFIG_INSTANCE"); do
+        lxd_exec "${LXD_NODENAME_PREFIX}${NODENAME}" "$@" < /dev/null || $IGNORE_ERROR
+    done
+}
+
+lxd_print_ssh_host_fingerprint()
+{
+    set +x
+    lxd_exec_all false sh -c 'echo -n "##### "; hostname; ls -1 /etc/ssh/ssh_host_*.pub | xargs -l ssh-keygen -l -f'
+    if [ $DEBUG -eq 1 ]; then
+        set -x
+    fi
 }
 
 lxd_is_running() {
